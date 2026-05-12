@@ -3,7 +3,7 @@
 **GitHub Repo:** https://github.com/tapshijaiswal/playwright-QA-assessment  
 **Target site:** https://storedemo.testdino.com/  
 **Stack:** TypeScript · Playwright Test · Node 20+  
-**Result:** ✅ 15 passed · ⏭ 2 skipped (by design) · ❌ 0 failed
+**Result:**  15 passed ·  2 skipped (by design) ·  0 failed
 
 ---
 
