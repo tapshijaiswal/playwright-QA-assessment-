@@ -1,6 +1,6 @@
 # Playwright QA Assignment
 
-> **GitHub Repo:** https://github.com/tapshijaiswal/playwright-QA-assessment
+> **GitHub Repo:** https://github.com/tapshijaiswal/playwright-QA-assessment-.git
 
 **Target site:** [https://storedemo.testdino.com/](https://storedemo.testdino.com/)  
 **Stack:** TypeScript · Playwright Test · Node 20+  

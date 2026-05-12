@@ -1,6 +1,6 @@
 # QA Engineer Assignment – Submission
 
-**GitHub Repo:** https://github.com/tapshijaiswal/playwright-QA-assessment  
+**GitHub Repo:** https://github.com/tapshijaiswal/playwright-QA-assessment-.git
 **Target site:** https://storedemo.testdino.com/  
 **Stack:** TypeScript · Playwright Test · Node 20+  
 **Result:**  15 passed ·  2 skipped (by design) ·  0 failed
