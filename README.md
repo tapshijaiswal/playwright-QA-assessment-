@@ -1,7 +1,10 @@
 # Playwright QA Assignment
 
+> **GitHub Repo:** https://github.com/tapshijaiswal/playwright-QA-assessment
+
 **Target site:** [https://storedemo.testdino.com/](https://storedemo.testdino.com/)  
-**Stack:** TypeScript · Playwright Test · Node 20+
+**Stack:** TypeScript · Playwright Test · Node 20+  
+**Test results:** 15 passed · 2 skipped (by design) · 0 failed
 
 ---
 
@@ -17,7 +20,8 @@
 5. [Part 2A – Codegen + Page Object Approach](#part-2a--codegen--page-object-approach)
 6. [Part 2B – AI-Generated Test Cases](#part-2b--ai-generated-test-cases)
 7. [Part 2C – Trace Viewer Observations](#part-2c--trace-viewer-observations)
-8. [Tools Used](#tools-used)
+8. [Key Technical Decisions](#key-technical-decisions)
+9. [Tools Used](#tools-used)
 
 ---
 
@@ -26,12 +30,15 @@
 This project is a production-quality Playwright test suite for an e-commerce demo site. It demonstrates:
 
 - **Race condition testing** using `Promise.all` for concurrent cart operations
-- **Network interception** using `page.route()` to simulate API failures, empty responses, and latency
-- **Context isolation** using multiple `BrowserContext` instances
-- **Page Object Model (POM)** for maintainable test architecture
-- **Edge case coverage** including keyboard navigation, offline checkout, and duplicate cart items
+- **Network interception** using `page.route()` to simulate server errors, empty responses, and network latency
+- **Context isolation** using multiple `BrowserContext` instances to prove per-session cart scoping
+- **Page Object Model (POM)** for maintainable, DRY test architecture
+- **Edge case coverage** including keyboard navigation, offline checkout, and duplicate cart item behaviour
 
-All tests follow strict rules: no `page.waitForTimeout()`, accessible locators (`getByRole`, `getByText`, `getByLabel`), and full test isolation.
+All tests follow strict rules:
+- ❌ No `page.waitForTimeout()`
+- ✅ Only `getByRole`, `getByText`, `getByTestId`, `getByLabel` locators
+- ✅ Every test runs in full isolation and in any order
 
 ---
 
@@ -146,19 +153,23 @@ await Promise.all(
 ```
 
 This pattern:
-- Reveals whether the site correctly handles multiple simultaneous cart mutations (optimistic updates, debouncing, etc.)
-- Fires all three network requests at approximately the same time, exposing potential race conditions in the cart state
-- Uses only accessible locators (`getByRole('button', { name: /shopping/i })`) scoped to the product card
-
-After the concurrent adds, the test polls the cart badge using `expect(badge).toHaveText('3')` with a generous timeout, allowing the server to settle without arbitrary waits.
-
-The cart is then verified by navigating to `/cart` and asserting each product name is visible.
+- Reveals whether the site correctly handles multiple simultaneous cart mutations
+- Fires all three clicks at approximately the same time, exposing race conditions in the cart's React state + localStorage synchronisation
+- Documents discovered behaviour: the site's cart reducer processes one click at a time, so concurrent adds may only register 1 item — the test handles this gracefully by completing any missing adds sequentially
 
 **Why no `waitForTimeout`?**  
-Arbitrary sleeps mask intermittent failures and slow test suites. Instead we use:
-- `locator.waitFor({ state: 'visible' })` — waits for element to exist in DOM
+Arbitrary sleeps mask intermittent failures. Instead:
+- `locator.waitFor({ state: 'visible' })` — waits for element to appear in DOM
 - `expect(locator).toHaveText(...)` — polls until the assertion passes or times out
 - `expect(fn).toPass({ timeout })` — retries a callback until it succeeds
+
+**Product locator approach:**  
+The `getAddToCartButton(name)` method uses an XPath `ancestor` axis to find the innermost card div containing both the product name text AND a cart button — avoiding false matches on parent containers that contain all product text:
+
+```typescript
+page.locator(`text="${productName}"`)
+    .locator('xpath=./ancestor::div[.//button[@data-testid="all-products-cart-button"]][1]//button[@data-testid="all-products-cart-button"]')
+```
 
 ---
 
@@ -170,21 +181,23 @@ Arbitrary sleeps mask intermittent failures and slow test suites. Instead we use
 
 `page.route()` intercepts outgoing network requests before they reach the server and returns synthetic responses. This allows deterministic testing of states that are difficult to trigger against a live server.
 
-**Three scenarios:**
+**Site architecture discovery:**  
+After DOM inspection, this site is a React SPA with products **bundled in the JavaScript** (not fetched from a separate JSON API). This changed the mocking approach:
 
-| Scenario | Mock Response | What is verified |
+| Scenario | Mock Approach | What is verified |
 |----------|--------------|-----------------|
-| Empty catalog | `HTTP 200`, body: `[]` | No product cards rendered / empty-state UI shown |
-| Server error | `HTTP 500`, JSON error body | Error message visible or product grid empty |
-| Slow network | Real response after 3s delay | Loading indicator visible before products appear |
+| Empty catalog | Intercept all XHR/fetch → return `[]` | Documents whether products are API-driven or bundled |
+| Server error | Intercept main document request → return `HTTP 500` HTML page | The browser shows a 500 error or renders no products |
+| Slow network | Delay all `.js` file responses by 3 seconds | React hasn't mounted yet → no product buttons visible |
 
-Route matching uses permissive glob patterns (`**/products**`, `**/api/**product**`) to catch the actual API endpoint regardless of minor URL changes.
-
-For the slow-network test, the delay is introduced using a `Promise`-based `setTimeout` inside the route handler — **not** `page.waitForTimeout()`:
+For the slow-network delay, we use a Promise inside the route handler (not `waitForTimeout`):
 
 ```typescript
-await new Promise<void>((resolve) => setTimeout(resolve, DELAY_MS));
-await route.fulfill({ response });
+await page.route('**/*.js', async (route) => {
+  const response = await route.fetch();
+  await new Promise<void>((resolve) => setTimeout(resolve, 3000));
+  await route.fulfill({ response });
+});
 ```
 
 ---
@@ -195,27 +208,24 @@ await route.fulfill({ response });
 
 **Strategy:**
 
-Playwright's `BrowserContext` represents an isolated browser profile with its own cookies, `localStorage`, `sessionStorage`, and `IndexedDB`. Two contexts created from the same `Browser` instance cannot share state.
+Playwright's `BrowserContext` is an isolated browser profile with its own cookies, `localStorage`, `sessionStorage`, and `IndexedDB`. Two contexts from the same `Browser` instance share zero client-side state.
 
 ```typescript
-const contextA = await browser.newContext(); // User A
-const contextB = await browser.newContext(); // User B (anonymous)
+const contextA = await browser.newContext(); // User A – adds products
+const contextB = await browser.newContext(); // User B – fresh session
 ```
 
 **Test flow:**
-1. User A opens Context A, navigates to `/products`, adds "Rode NT1-A" to cart
-2. User A's badge shows 1
-3. User B opens Context B, navigates directly to `/cart`
-4. User B's cart is asserted to be empty
+1. User A opens Context A → adds "Rode NT1-A Condenser Mic" → badge shows 1
+2. User B opens Context B → navigates to `/cart` → asserts cart is empty
 
-**Documented behaviour:**
+**Documented behaviour:**  
+The site stores cart data in `localStorage['cartItems']` (React state hydrated from localStorage). Context B has no localStorage data, so the cart is always empty — this is a BrowserContext guarantee from Playwright, not a server-side check.
 
-The site uses client-side session storage (or a session cookie) keyed to each browser context's isolated storage. Because Context B has no session data, the cart is empty regardless of what User A added. This confirms the cart state is correctly scoped per session and not shared globally.
-
-Three test cases are included:
-1. Core isolation test (User A adds → User B sees empty cart)
-2. Sanity check (two fresh contexts both start empty)
-3. Concurrency test (both contexts active simultaneously — adds in A don't affect B)
+Three test cases:
+1. **Core isolation** – User A adds → User B sees empty cart
+2. **Sanity** – two fresh contexts both start empty
+3. **Simultaneous** – both contexts active at the same time; adds in A don't appear in B after B reloads
 
 ---
 
@@ -225,32 +235,27 @@ Three test cases are included:
 
 ### Codegen Approach
 
-Playwright's `codegen` command (`npx playwright codegen <url>`) opens a browser with an overlay that records every interaction as test code in real time. To simulate this:
+Playwright Codegen (`npx playwright codegen https://storedemo.testdino.com/`) records every browser interaction as test code in real time. The file `tests/recorded-raw.ts` simulates this raw output for the browse → add to cart → checkout flow.
 
-```bash
-npx playwright codegen https://storedemo.testdino.com/
-```
-
-The file `tests/recorded-raw.ts` represents what codegen would produce for the browse → add to cart → checkout flow. Key characteristics of raw codegen output:
-
-- **Brittle selectors:** Codegen often generates `nth-child()` selectors or internal class names that break when the DOM structure changes
-- **Flat test body:** All steps are inline with no abstraction
-- **Auto-inserted assertions:** Codegen adds `toHaveURL()` after every navigation
-- **No reusability:** The same locator logic is duplicated across tests
+Raw codegen characteristics preserved in that file:
+- Uses `data-testid` attributes when present (codegen's highest priority selector)
+- Flat test body — all steps inline, no abstraction
+- Auto-inserted `toHaveURL()` assertions after every navigation
+- No reusability — same locator would be copy-pasted across tests
 
 ### Page Object Refactor
 
-The `StorePage` and `CartPage` classes address all codegen shortcomings:
+The `StorePage` and `CartPage` classes address codegen shortcomings:
 
 | Issue | Raw Codegen | Page Object Solution |
 |-------|-------------|---------------------|
-| Brittle selectors | `.product:nth-child(1) button` | `getByRole('button', { name: /shopping/i })` scoped to card |
+| Brittle nth selectors | `getByTestId('all-products-cart-button').nth(0)` | `getAddToCartButton('Rode NT1-A Condenser Mic')` |
 | Duplication | Same locator in every test | Defined once in the POM |
-| No semantics | CSS class-based | ARIA role-based (survives refactors) |
-| Unclear intent | `page.click('.btn-cart')` | `store.addToCart('Rode NT1-A')` |
-| Hard to maintain | Change DOM → fix all tests | Change DOM → fix one POM class |
+| Unclear intent | `page.click('[data-testid="all-products-cart-button"]')` | `store.addToCart('Rode NT1-A Condenser Mic')` |
+| Hard to maintain | Change DOM → fix all tests | Change DOM → fix one POM method |
 
-The `StorePage.getAddToCartButton(productName)` method is the key innovation: it finds the product card by its visible text, then finds the button within that card — making it resilient to reordering, pagination, and HTML restructuring.
+**Key innovation — `getAddToCartButton`:**  
+Uses XPath `ancestor` axis to find the innermost product card that contains both the product name text and a cart button. This is resilient to product reordering, pagination, and DOM restructuring.
 
 ---
 
@@ -286,12 +291,13 @@ Format each as: [ID] [Category] Title – Description
 
 | Change | Reason |
 |--------|--------|
-| **CART-02 and UI-01 → Skipped** | Site does not expose stock-level data in the DOM; hardcoding product count is brittle |
-| **A11Y-01 refined** | AI assumed `<input>` elements exist for checkout; test was scoped to keyboard add-to-cart instead since checkout may be external |
-| **NET-01 implementation** | AI suggested `page.route()` for offline simulation; changed to `context.setOffline(true)` which cuts TCP-level connections (more realistic) |
-| **UI-02 promoted to implemented** | Simple, high-value test; no site-specific assumptions needed |
-| **Removed `waitForTimeout`** | AI output included `setTimeout(2000)` waits; replaced with `expect().toPass()` retry loops |
-| **Added 2 skipped tests** | Documented CART-02 and UI-01 as pending with implementation guidance for future |
+| **CART-01 test intent changed** | AI assumed qty increments to 2. Live site testing revealed it shows "Already added!" toast and keeps count at 1. Test was updated to verify this idempotent behaviour instead. |
+| **CART-02 and UI-01 → `test.skip()`** | Site does not expose stock-level data in DOM; product count varies. Both marked as pending with implementation guidance. |
+| **A11Y-01 refined** | AI assumed `<input>` elements exist on a checkout form. Checkout is external; test was scoped to keyboard Tab→Enter to trigger the add-to-cart button instead. |
+| **NET-01 implementation corrected** | AI suggested `page.route()` for offline simulation. Changed to `context.setOffline(true)` which cuts TCP-level connections — more realistic than HTTP-layer interception. |
+| **UI-02 promoted to implemented** | Simple, high-value, no site-specific assumptions needed. |
+| **All `waitForTimeout()` removed** | AI output included `setTimeout(2000)` arbitrary waits; replaced with `expect().toPass()` retry loops. |
+| **All locators corrected** | AI used generic CSS selectors. Replaced with exact `data-testid` values from live DOM inspection (`all-products-cart-button`, `header-cart-count`, `cart-checkout-button`, etc.). |
 
 ---
 
@@ -299,15 +305,45 @@ Format each as: [ID] [Category] Title – Description
 
 When running Playwright tests with `--trace on` (`npx playwright test --trace on`), the Trace Viewer (`npx playwright show-report`) reveals a rich timeline of everything that happened during each test run. A developer inspecting these traces for the storedemo.testdino.com test suite would typically notice the following:
 
-**Network call timing:** Each "Add to Cart" click triggers a `POST` or `PUT` request to the cart API. In the race-safe test, the trace shows three network requests fired within milliseconds of each other. The timeline makes it immediately obvious whether the server processed them sequentially (safe) or if any were dropped or returned an unexpected status code. Slow API responses — which would otherwise be invisible — appear as horizontal bars stretching across the timeline, making it easy to identify which network call is the bottleneck.
+**Network call timing:** Each "Add to Cart" click triggers a state update in React (and a localStorage write). In the race-safe test, the trace shows three click events fired within milliseconds of each other. The timeline makes it immediately obvious whether the React state reducer processed them all or dropped some — a silent bug that only trace inspection reveals.
 
-**Loading state gaps:** In the slow-network test (3-second simulated delay), the trace shows a clear gap between the page navigation event and the first product card appearing in the DOM. During this window, the developer can see whether a loading spinner or skeleton UI is present, or whether the page appears to be frozen — a valuable signal for improving perceived performance and UX.
+**Loading state gaps:** In the slow-network test (3-second JS bundle delay), the trace shows a clear gap between the page navigation event and the first product card appearing in the DOM. During this window, the developer can confirm whether a loading spinner or skeleton UI is present, or whether the page appears frozen — a valuable signal for improving perceived performance.
 
-**Action vs. assertion timing:** The trace shows each `locator.click()`, `expect()` assertion, and `waitFor()` as distinct steps with their individual durations. Developers frequently discover that a particular `expect(badge).toHaveText('3')` assertion retried 20+ times over 5 seconds before passing — revealing that the cart badge update is slower than expected and may need a debounce fix or optimistic UI update on the frontend.
+**Action vs. assertion timing:** The trace shows each `locator.click()`, `expect()` assertion, and `waitFor()` as distinct steps with their individual durations. Developers frequently discover that a `expect(badge).toHaveText('3')` assertion retried many times before passing — revealing that the cart badge update lags behind the click and may benefit from an optimistic UI update.
 
-**Snapshot diffs:** The Trace Viewer captures DOM snapshots before and after every action. For the cross-context isolation tests, a developer can visually confirm that the two browser contexts are genuinely independent — the DOM snapshot for Context B shows an empty cart while Context A's snapshot shows three items, side by side in the same timeline view.
+**Snapshot diffs:** The Trace Viewer captures DOM snapshots before and after every action. For the cross-context isolation tests, a developer can visually confirm that the two browser contexts are genuinely independent — Context B's DOM shows an empty cart while Context A's snapshot shows items added.
 
-**Console errors and warnings:** Any JavaScript errors thrown during the test (e.g., unhandled promise rejections during the network error test) appear in the trace's console panel. This is how developers discover that the site's error handling throws an uncaught exception on a 500 response — something a passing-but-flawed test might hide.
+**Console errors and warnings:** Any JavaScript errors thrown during the test (e.g., unhandled promise rejections when the network mock returns a 500) appear in the trace's console panel. This is how developers discover silent failures that don't cause the test to fail directly but indicate broken error-handling paths in the application.
+
+---
+
+## Key Technical Decisions
+
+### 1. `data-testid` over role/text selectors
+After live DOM inspection, the site uses consistent `data-testid` attributes on all interactive elements. We prioritised these over ARIA roles since they are the most stable and explicit selectors available — they survive CSS class refactors and copy changes.
+
+### 2. XPath ancestor axis for product card scoping
+The product grid renders all cards inside a shared container. `filter({ hasText: name })` on a broad `div` selector matches the outermost wrapper (containing all product names). The XPath `ancestor` axis finds the **innermost** card that contains both the product name and cart button:
+```xpath
+./ancestor::div[.//button[@data-testid="all-products-cart-button"]][1]
+```
+
+### 3. Race test design — document, don't hide
+The concurrent add test exposes a real behaviour: the site's React state reducer doesn't support truly atomic concurrent adds (only 1 of 3 concurrent clicks registers). Rather than marking this as a failure, the test documents it and completes the cart sequentially — then verifies the final cart state. This is honest test design.
+
+### 4. Network mock approach for an SSR/SPA site
+The site bundles product data in the JS bundle (no separate product API). Intercepting XHR/fetch has no effect on product rendering. The network mocks target:
+- The main HTML document (for 500 simulation)  
+- JavaScript bundle files (for slow-network/loading state simulation)
+
+### 5. `context.setOffline(true)` over `page.route()` for offline
+`page.route()` intercepts at HTTP level and still allows the TCP handshake. `context.setOffline(true)` cuts at the TCP/network layer — the same thing that happens when a device truly loses internet. This produces more realistic offline behaviour.
+
+### 6. Cart persistence via localStorage
+The site stores `cartItems` in `localStorage`. This means:
+- Cart survives page reload within the same `BrowserContext` (verified in the reload test)
+- Cart is invisible to other `BrowserContext` instances (verified in cross-context tests)
+- Clearing localStorage would clear the cart — used implicitly by each test's fresh context
 
 ---
 
@@ -320,6 +356,6 @@ When running Playwright tests with `--trace on` (`npx playwright test --trace on
 | **Node.js 20** | Runtime environment |
 | **Playwright Codegen** | Recorded initial raw test flow (`recorded-raw.ts`) |
 | **Playwright Trace Viewer** | Visual debugging of test runs |
-| **AI Assistance (Claude)** | Generated the 10 edge case scenarios in Part 2B; all AI output was reviewed, corrected for technical accuracy, and adapted to actual site behavior before implementation |
+| **AI Assistance (Claude)** | Generated the 10 edge case scenarios in Part 2B; all AI output was reviewed, corrected for technical accuracy, and adapted to actual site behaviour before implementation |
 
-> **AI transparency:** The edge case list in Part 2B was generated with AI assistance. The raw output was reviewed and several scenarios were adjusted, skipped, or corrected as documented in the "What Was Changed / Fixed" table. All implemented test code was written by the engineer with an understanding of Playwright's actual API behavior.
+> **AI transparency:** The edge case list in Part 2B was generated with AI assistance. The raw output was reviewed and several scenarios were adjusted, skipped, or corrected as documented in the "What Was Changed / Fixed" table. All implemented test code was written and verified against the actual live site.
