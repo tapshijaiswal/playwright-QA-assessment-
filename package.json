@@ -1,0 +1,23 @@
+{
+  "name": "playwright-qa-assignment",
+  "version": "1.0.0",
+  "description": "Playwright QA Engineer assignment – storedemo.testdino.com",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "test:trace": "playwright test --trace on",
+    "test:debug": "playwright test --debug",
+    "codegen": "playwright codegen https://storedemo.testdino.com/",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.44.0",
+    "@types/node": "^20.12.0",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
